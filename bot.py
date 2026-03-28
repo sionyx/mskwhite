@@ -208,7 +208,9 @@ async def _issue_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔐 Ключ Outline успешно создан \\(нажмите, чтобы скопировать\\):\n\n"
         f"`{access_key}`"
-        f"\n\nВы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой /paysupport",
+        "\n\nДля подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить. После этого можете активировать VPN кнопкой Подключить."
+        "\n\nЕсли у вас нет приложения Outline, вы можете его скачать воспользовавшись командой /download"
+        f"\n\nВы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport",
         parse_mode="MarkdownV2",
     )
 
@@ -588,6 +590,7 @@ def main():
     
     # Добавление обработчиков
     application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("download", download_outline))
     application.add_handler(CommandHandler("paysupport", paysupport_handler))
     application.add_handler(MessageHandler(filters.Text("🛒 Купить доступ"), buy_handler))
     application.add_handler(MessageHandler(filters.Text("🔑 Мой ключ"), my_key))
