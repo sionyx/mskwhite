@@ -50,6 +50,7 @@ user_keyboard = ReplyKeyboardMarkup(
 
 DB_PATH = "payments.db"
 DEFAULT_PAY_SUPPORT_LIMIT_MB = 100.0
+DEFAULT_SUBSCRIPTION_PRICE_STARS = 100
 
 
 def init_database(db_path: str = DB_PATH) -> None:
@@ -143,6 +144,22 @@ def get_pay_support_limit_mb() -> float:
         raise ValueError("PAY_SUPPORT_LIMIT_MB не может быть отрицательным")
 
     return limit_mb
+
+
+
+def get_subscription_price_stars() -> int:
+    """Возвращает стоимость подписки в Telegram Stars из переменных окружения."""
+    raw_value = os.getenv("SUBSCRIPTION_PRICE_STARS", str(DEFAULT_SUBSCRIPTION_PRICE_STARS)).strip()
+
+    try:
+        price_stars = int(raw_value)
+    except ValueError as error:
+        raise ValueError("SUBSCRIPTION_PRICE_STARS должен быть целым числом") from error
+
+    if price_stars <= 0:
+        raise ValueError("SUBSCRIPTION_PRICE_STARS должен быть положительным числом")
+
+    return price_stars
 
 
 
@@ -369,14 +386,13 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
-    welcome_text = """
+    subscription_price_stars = context.application.bot_data["subscription_price_stars"]
+    welcome_text = f"""
 👋 Добро пожаловать в VPN-сервис Москва Белокаменная!
 
 Мы предоставляем надежный VPN-доступ через Outline который работает в условиях "белых списков".
 
-⭐ Стоимость доступа: 100 Telegram Stars на месяц. Ограничение трафика 100 ГБ.
-
-Во время тестового периода действует скидка 99%!
+⭐ Стоимость доступа: {subscription_price_stars} Telegram Stars на месяц. Ограничение трафика 100 ГБ.
 
 Нажмите кнопку ниже, чтобы начать покупку или получите уже оплаченный ключ:
     """.strip()
@@ -385,7 +401,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
 async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопки покупки - отправка инвойса на 10 Telegram Stars."""
+    """Обработчик кнопки покупки - отправка инвойса на стоимость из конфигурации."""
     user = update.effective_user
     chat_id = update.effective_chat.id
     outline_service = context.application.bot_data.get("outline_service")
@@ -422,12 +438,13 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Получение токена платежного провайдера из контекста
     provider_token = context.bot_data.get('payment_token')
 
-    # Создание инвойса на 10 Telegram Stars
+    # Создание инвойса на стоимость из переменных окружения
+    subscription_price_stars = context.application.bot_data['subscription_price_stars']
     title = "VPN-доступ через Outline"
     description = "Доступ к VPN-серверу Outline на 30 дней"
     payload = "vpn_access_purchase"
     currency = "XTR"  # Telegram Stars
-    price = 1  # 10 Telegram Stars
+    price = subscription_price_stars
 
     prices = [LabeledPrice("VPN доступ", price)]
 
@@ -539,9 +556,10 @@ def main():
 
     try:
         pay_support_limit_mb = get_pay_support_limit_mb()
+        subscription_price_stars = get_subscription_price_stars()
     except ValueError as error:
-        logging.error("Некорректное значение PAY_SUPPORT_LIMIT_MB: %s", error)
-        print("❌ Ошибка: некорректное значение PAY_SUPPORT_LIMIT_MB")
+        logging.error("Некорректное значение переменной окружения: %s", error)
+        print("❌ Ошибка: некорректное значение переменной окружения")
         return
 
     try:
@@ -559,6 +577,7 @@ def main():
     application.bot_data['payment_token'] = payment_token
     application.bot_data['admin_user_id'] = admin_user_id
     application.bot_data['pay_support_limit_mb'] = pay_support_limit_mb
+    application.bot_data['subscription_price_stars'] = subscription_price_stars
 
     try:
         application.bot_data['outline_service'] = OutlineService.from_env()
