@@ -338,12 +338,13 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     subscription_price_stars = context.application.bot_data["subscription_price_stars"]
+    traffic_limit_mb = context.application.bot_data['traffic_limit_mb'] / 1024
     welcome_text = f"""
 👋 Добро пожаловать в VPN-сервис Москва Белокаменная!
 
 Мы предоставляем надежный VPN-доступ через Outline который работает в условиях "белых списков".
 
-⭐ Стоимость доступа: {subscription_price_stars} Telegram Stars на месяц. Ограничение трафика 100 ГБ.
+⭐ Стоимость доступа: {subscription_price_stars} Telegram Stars на месяц. Ограничение трафика {traffic_limit_mb:.0f} ГБ.
 
 Нажмите кнопку ниже, чтобы начать покупку или получите уже оплаченный ключ:
     """.strip()
