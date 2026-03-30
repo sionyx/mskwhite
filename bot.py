@@ -2,8 +2,9 @@ import os
 import sqlite3
 import logging
 import argparse
-from datetime import datetime, timezone
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
+import asyncio
+from datetime import datetime, timedelta, timezone
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice, User
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,6 +16,10 @@ from telegram.ext import (
 from dotenv import load_dotenv
 
 from outline_service import OutlineService, OutlineServiceError
+
+SUBSCRIPTION_DURATION = timedelta(days=30)
+EXPIRATION_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_TRAFFIC_LIMIT_MB = 100 * 1024
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -131,6 +136,56 @@ def mark_purchase_refunded(payment_id: str, db_path: str = DB_PATH) -> None:
 
 
 
+def get_expired_purchases(
+    expires_before: datetime,
+    db_path: str = DB_PATH,
+) -> list[sqlite3.Row]:
+    """Возвращает активные покупки, срок действия которых истек."""
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            """
+            SELECT id, payment_datetime, user_id, username, payment_id, transaction_type
+            FROM purchases
+            WHERE transaction_type = 'purchase'
+              AND payment_datetime <= ?
+            ORDER BY payment_datetime ASC, id ASC
+            """,
+            (expires_before.isoformat(),),
+        ).fetchall()
+
+
+
+def mark_purchase_expired(payment_id: str, db_path: str = DB_PATH) -> None:
+    """Помечает платеж как истекший."""
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE purchases
+            SET transaction_type = 'expired'
+            WHERE payment_id = ?
+            """,
+            (payment_id,),
+        )
+        connection.commit()
+
+
+
+def mark_purchase_overquota(payment_id: str, db_path: str = DB_PATH) -> None:
+    """Помечает платеж как исчерпавший лимит трафика."""
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE purchases
+            SET transaction_type = 'overquota'
+            WHERE payment_id = ?
+            """,
+            (payment_id,),
+        )
+        connection.commit()
+
+
+
 def get_pay_support_limit_mb() -> float:
     """Возвращает лимит трафика для возврата из переменных окружения."""
     raw_value = os.getenv("PAY_SUPPORT_LIMIT_MB", str(DEFAULT_PAY_SUPPORT_LIMIT_MB)).strip()
@@ -160,6 +215,67 @@ def get_subscription_price_stars() -> int:
         raise ValueError("SUBSCRIPTION_PRICE_STARS должен быть положительным числом")
 
     return price_stars
+
+
+
+def get_traffic_limit_mb() -> float:
+    """Возвращает лимит трафика подписки в мегабайтах из переменных окружения."""
+    raw_value = os.getenv("TRAFFIC_LIMIT_MB", str(DEFAULT_TRAFFIC_LIMIT_MB)).strip()
+
+    try:
+        traffic_limit_mb = float(raw_value)
+    except ValueError as error:
+        raise ValueError("TRAFFIC_LIMIT_MB должен быть числом") from error
+
+    if traffic_limit_mb <= 0:
+        raise ValueError("TRAFFIC_LIMIT_MB должен быть положительным числом")
+
+    return traffic_limit_mb
+
+
+
+def build_telegram_user(user_id: int, username: str | None) -> User:
+    """Создает минимальный объект пользователя Telegram для сервисных операций."""
+    return User(
+        id=user_id,
+        first_name=username or f"user-{user_id}",
+        is_bot=False,
+        username=username,
+    )
+
+
+
+def format_user_label(user_id: int, username: str | None) -> str:
+    """Формирует строку пользователя для логов и уведомлений администратору."""
+    if username:
+        return f"@{username} \\(ID: {user_id}\\)"
+
+    return f"ID: {user_id}"
+
+
+
+async def notify_admin_key_revoked(
+    application: Application,
+    user_id: int,
+    username: str | None,
+    reason: str,
+) -> None:
+    """Отправляет администратору уведомление об отзыве ключа пользователя."""
+    admin_user_id = application.bot_data.get("admin_user_id")
+    if not admin_user_id:
+        logging.warning("Не удалось отправить уведомление администратору: admin_user_id не задан")
+        return
+
+    user_label = format_user_label(user_id, username)
+    await application.bot.send_message(
+        chat_id=admin_user_id,
+        text=(
+            "🔒 Ключ пользователя отозван\n\n"
+            f"Пользователь: {user_label}\n"
+            f"Причина: {reason}"
+        ),
+        parse_mode="MarkdownV2",
+    )
 
 
 
@@ -512,6 +628,176 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     await _issue_key(update, context)
 
 
+async def expire_subscriptions(application: Application) -> None:
+    """Находит истекшие подписки, уведомляет пользователей и удаляет их ключи Outline."""
+    outline_service = application.bot_data.get("outline_service")
+    if not outline_service:
+        logging.warning("Проверка истекших подписок пропущена: OutlineService не инициализирован")
+        return
+
+    expires_before = datetime.now(timezone.utc) - SUBSCRIPTION_DURATION
+
+    try:
+        expired_purchases = get_expired_purchases(expires_before)
+    except sqlite3.Error as error:
+        logging.exception("Не удалось получить список истекших подписок: %s", error)
+        return
+
+    if not expired_purchases:
+        logging.info("Истекших подписок не найдено")
+        return
+
+    logging.info("Найдено %s истекших подписок", len(expired_purchases))
+
+    for purchase in expired_purchases:
+        user_id = purchase["user_id"]
+        username = purchase["username"]
+        payment_id = purchase["payment_id"]
+        telegram_user = build_telegram_user(user_id, username)
+
+        try:
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "⏰ Срок вашей подписки истек.\n\n"
+                    "Текущий ключ Outline деактивирован. Чтобы продолжить пользоваться сервисом, "
+                    "оформите новую покупку."
+                ),
+            )
+            outline_service.delete_access_key_for_user(telegram_user)
+            mark_purchase_expired(payment_id)
+            await notify_admin_key_revoked(
+                application=application,
+                user_id=user_id,
+                username=username,
+                reason="истек срок подписки",
+            )
+            logging.info("Подписка пользователя %s помечена как expired", user_id)
+        except sqlite3.Error as error:
+            logging.exception(
+                "Не удалось пометить покупку %s как expired: %s",
+                payment_id,
+                error,
+            )
+        except OutlineServiceError as error:
+            logging.exception(
+                "Не удалось удалить ключ Outline для пользователя %s: %s",
+                user_id,
+                error,
+            )
+        except Exception as error:
+            logging.exception(
+                "Не удалось обработать истечение подписки пользователя %s: %s",
+                user_id,
+                error,
+            )
+
+
+
+async def check_overquota_subscriptions(application: Application) -> None:
+    """Находит пользователей с превышением лимита трафика, уведомляет их и удаляет ключи Outline."""
+    outline_service = application.bot_data.get("outline_service")
+    if not outline_service:
+        logging.warning("Проверка превышения лимита трафика пропущена: OutlineService не инициализирован")
+        return
+
+    try:
+        active_purchases = get_expired_purchases(datetime.now(timezone.utc) + timedelta(days=365 * 100))
+    except sqlite3.Error as error:
+        logging.exception("Не удалось получить список активных подписок для проверки трафика: %s", error)
+        return
+
+    if not active_purchases:
+        logging.info("Активных подписок для проверки трафика не найдено")
+        return
+
+    overquota_count = 0
+
+    for purchase in active_purchases:
+        user_id = purchase["user_id"]
+        username = purchase["username"]
+        payment_id = purchase["payment_id"]
+        telegram_user = build_telegram_user(user_id, username)
+
+        try:
+            used_megabytes = outline_service.get_used_megabytes_for_user(telegram_user)
+            traffic_limit_mb = application.bot_data["traffic_limit_mb"]
+            if used_megabytes < traffic_limit_mb:
+                continue
+
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "📶 Лимит трафика по вашей подписке исчерпан.\n\n"
+                    "Текущий ключ Outline деактивирован. Чтобы продолжить пользоваться сервисом, "
+                    "оформите новую покупку."
+                ),
+            )
+            outline_service.delete_access_key_for_user(telegram_user)
+            mark_purchase_overquota(payment_id)
+            await notify_admin_key_revoked(
+                application=application,
+                user_id=user_id,
+                username=username,
+                reason="превышен лимит трафика",
+            )
+            overquota_count += 1
+            logging.info("Подписка пользователя %s помечена как overquota", user_id)
+        except sqlite3.Error as error:
+            logging.exception(
+                "Не удалось пометить покупку %s как overquota: %s",
+                payment_id,
+                error,
+            )
+        except OutlineServiceError as error:
+            logging.exception(
+                "Не удалось проверить или удалить ключ Outline для пользователя %s: %s",
+                user_id,
+                error,
+            )
+        except Exception as error:
+            logging.exception(
+                "Не удалось обработать превышение лимита пользователя %s: %s",
+                user_id,
+                error,
+            )
+
+    if overquota_count == 0:
+        logging.info("Пользователей с превышением лимита трафика не найдено")
+
+
+
+async def run_daily_expiration_check(application: Application) -> None:
+    """Запускает ежедневные проверки истечения подписок и превышения лимита трафика."""
+    while True:
+        await expire_subscriptions(application)
+        await check_overquota_subscriptions(application)
+        await asyncio.sleep(EXPIRATION_CHECK_INTERVAL_SECONDS)
+
+
+
+async def on_startup(application: Application) -> None:
+    """Запускает фоновую задачу проверки истекших подписок."""
+    application.bot_data["expiration_task"] = asyncio.create_task(
+        run_daily_expiration_check(application)
+    )
+
+
+
+async def on_shutdown(application: Application) -> None:
+    """Корректно останавливает фоновые задачи приложения."""
+    expiration_task = application.bot_data.get("expiration_task")
+    if not expiration_task:
+        return
+
+    expiration_task.cancel()
+    try:
+        await expiration_task
+    except asyncio.CancelledError:
+        logging.info("Фоновая задача проверки истекших подписок остановлена")
+
+
+
 async def unknown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик неизвестных команд"""
     await update.message.reply_text("Извините, я не понимаю эту команду. Используйте /start для начала работы.")
@@ -559,9 +845,10 @@ def main():
     try:
         pay_support_limit_mb = get_pay_support_limit_mb()
         subscription_price_stars = get_subscription_price_stars()
+        traffic_limit_mb = get_traffic_limit_mb()
     except ValueError as error:
         logging.error("Некорректное значение переменной окружения: %s", error)
-        print("❌ Ошибка: некорректное значение переменной окружения")
+        print(f"❌ Ошибка: {error}")
         return
 
     try:
@@ -573,13 +860,20 @@ def main():
         return
 
     # Создание приложения
-    application = Application.builder().token(bot_token).build()
+    application = (
+        Application.builder()
+        .token(bot_token)
+        .post_init(on_startup)
+        .post_shutdown(on_shutdown)
+        .build()
+    )
     
     # Сохранение токена платежного провайдера в контексте бота
     application.bot_data['payment_token'] = payment_token
     application.bot_data['admin_user_id'] = admin_user_id
     application.bot_data['pay_support_limit_mb'] = pay_support_limit_mb
     application.bot_data['subscription_price_stars'] = subscription_price_stars
+    application.bot_data['traffic_limit_mb'] = traffic_limit_mb
 
     try:
         application.bot_data['outline_service'] = OutlineService.from_env()
@@ -605,7 +899,6 @@ def main():
     print("Бот запущен...")
     
     # Создание и запуск event loop для Python 3.14
-    import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
