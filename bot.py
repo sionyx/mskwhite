@@ -157,9 +157,10 @@ async def _issue_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔐 Ключ Outline успешно создан \\(нажмите, чтобы скопировать\\):\n\n"
         f"`{access_key}`"
-        "\n\nДля подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить. После этого можете активировать VPN кнопкой Подключить."
-        "\n\nЕсли у вас нет приложения Outline, вы можете его скачать воспользовавшись командой /download"
-        f"\n\nВы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport",
+        "\n\n🛜 Для подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить. После этого можете активировать VPN кнопкой Подключить."
+        "\n\n📥 Если у вас нет приложения Outline, вы можете его скачать воспользовавшись командой /download"
+        f"\n\n⏳ Вы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport",
+        f"\n\n🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ",
         parse_mode="MarkdownV2",
     )
 
@@ -346,7 +347,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⭐ Стоимость доступа: {subscription_price_stars} Telegram Stars на месяц. Ограничение трафика {traffic_limit_mb:.0f} ГБ.
 
-Нажмите кнопку ниже, чтобы начать покупку или получите уже оплаченный ключ:
+Нажмите кнопку ниже, чтобы начать покупку или получите уже оплаченный ключ.
+
+🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ.
     """.strip()
 
     reply_markup = admin_keyboard if is_admin(update, context) else user_keyboard
@@ -493,6 +496,79 @@ async def on_shutdown(application: Application) -> None:
 
 
 
+def format_user_mention(user: User) -> str:
+    """Возвращает строку с данными пользователя для сообщений администратору."""
+    username = f"@{user.username}" if user.username else "без username"
+    full_name = user.full_name
+    return (
+        f"{full_name} ({username}, id={user.id})"
+    )
+
+
+async def forward_user_message_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылает обычные сообщения пользователей администратору."""
+    message = update.effective_message
+    user = update.effective_user
+    admin_user_id = context.application.bot_data.get("admin_user_id")
+
+    if not message or not user or admin_user_id is None:
+        return
+
+    if user.id == admin_user_id:
+        return
+
+    await context.bot.send_message(
+        chat_id=admin_user_id,
+        text=(
+            "📩 Новое сообщение от пользователя\n"
+            f"👤 {format_user_mention(user)}"
+        ),
+    )
+
+    forwarded_message = await message.forward(chat_id=admin_user_id)
+    context.application.bot_data.setdefault("forwarded_messages", {})[
+        forwarded_message.message_id
+    ] = user.id
+
+    await message.reply_text(
+        "✅ Ваше сообщение отправлено администратору. Ответ придет сюда от имени бота."
+    )
+
+
+async def relay_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет ответ администратора пользователю, если это ответ на пересланное сообщение."""
+    message = update.effective_message
+    admin_user_id = context.application.bot_data.get("admin_user_id")
+
+    if not message or not message.reply_to_message or update.effective_user is None:
+        return
+
+    if update.effective_user.id != admin_user_id:
+        return
+
+    forwarded_messages = context.application.bot_data.get("forwarded_messages", {})
+    target_user_id = forwarded_messages.get(message.reply_to_message.message_id)
+    if not target_user_id:
+        return
+
+    reply_text = message.text or message.caption
+    if not reply_text:
+        await message.reply_text(
+            "⚠️ Сейчас можно пересылать пользователю только текстовые ответы администратора."
+        )
+        return
+
+    await context.bot.send_message(
+        chat_id=target_user_id,
+        text=(
+            "💬 Ответ администратора:\n\n"
+            f"{reply_text}"
+        ),
+    )
+
+    await message.reply_text("✅ Ответ отправлен пользователю.")
+
+
 async def unknown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик неизвестных команд"""
     await update.message.reply_text("Извините, я не понимаю эту команду. Используйте /start для начала работы.")
@@ -588,7 +664,9 @@ def main():
     application.add_handler(MessageHandler(filters.Text("📥 Скачать Outline"), download_outline))
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+    application.add_handler(MessageHandler(filters.REPLY & filters.TEXT, relay_admin_reply))
     application.add_handler(MessageHandler(filters.COMMAND, unknown_handler))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_user_message_to_admin))
     
     # Запуск бота
     print("Бот запущен...")
