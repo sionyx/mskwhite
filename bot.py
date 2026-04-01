@@ -257,7 +257,7 @@ async def download_outline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Android: https://play.google.com/store/apps/details?id=org.outline.android.client\n"
         "• iPhone / iPad: https://apps.apple.com/app/outline-app/id1356177741\n"
         "• Windows: https://s3.amazonaws.com/outline-releases/client/windows/stable/Outline-Client.exe\n"
-        "• macOS: https://s3.amazonaws.com/outline-releases/client/darwin/stable/Outline-Client.dmg\n"
+        "• macOS: https://apps.apple.com/ru/app/outline-secure-internet-access/id1356178125?mt=12\n"
         "• Linux: https://s3.amazonaws.com/outline-releases/client/linux/stable/Outline-Client.AppImage\n"
         "• Официальная страница: https://getoutline.org/get-started/#step-3"
     )
