@@ -25,7 +25,7 @@ from outline_service import OutlineService, OutlineServiceError
 from subscription_checks import check_overquota_subscriptions, expire_subscriptions
 
 EXPIRATION_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
-DEFAULT_TRAFFIC_LIMIT_MB = 100 * 1024
+DEFAULT_TRAFFIC_LIMIT_MB = 100 * 1000
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -339,7 +339,7 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     subscription_price_stars = context.application.bot_data["subscription_price_stars"]
-    traffic_limit_mb = context.application.bot_data['traffic_limit_mb'] / 1024
+    traffic_limit_mb = context.application.bot_data['traffic_limit_mb'] / 1000
     welcome_text = f"""
 👋 Добро пожаловать в VPN-сервис Москва Белокаменная!
 

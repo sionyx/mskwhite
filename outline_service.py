@@ -108,7 +108,7 @@ class OutlineService:
             raise OutlineServiceError("Для пользователя не найден ключ Outline")
 
         used_bytes = getattr(key, "used_bytes", 0) or 0
-        return used_bytes / (1024 * 1024)
+        return used_bytes / (1000 * 1000)
 
     def delete_access_key_for_user(self, telegram_user) -> bool:
         key = self.get_key_for_user(telegram_user)
@@ -164,12 +164,12 @@ class OutlineService:
         name = getattr(key, "name", None) or "без имени"
         used_bytes = getattr(key, "used_bytes", 0) or 0
         data_limit = getattr(key, "data_limit", None)
-        used_megabytes = used_bytes / (1024 * 1024)
+        used_gigabytes = used_bytes / (1000 * 1000 * 1000)
 
-        summary = f"• ID: {key_id} | Имя: {name} | Трафик: {used_megabytes:.2f} МБ"
+        summary = f"• ID: {key_id} | Имя: {name} | Трафик: {used_gigabytes:.2f} ГБ"
         if data_limit is not None:
-            data_limit_megabytes = data_limit / (1024 * 1024)
-            summary += f" | Лимит: {data_limit_megabytes:.2f} МБ"
+            data_limit_gigabytes = data_limit / (1000 * 1000 * 1000)
+            summary += f" | Лимит: {data_limit_gigabytes:.2f} ГБ"
 
         return summary
 
