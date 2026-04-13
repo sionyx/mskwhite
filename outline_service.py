@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote
 
+BYTES_IN_MEGABYTE = 1000 * 1000
+
 from outline_vpn.outline_vpn import OutlineVPN
 
 
@@ -108,7 +110,18 @@ class OutlineService:
             raise OutlineServiceError("Для пользователя не найден ключ Outline")
 
         used_bytes = getattr(key, "used_bytes", 0) or 0
-        return used_bytes / (1000 * 1000)
+        return used_bytes / BYTES_IN_MEGABYTE
+
+    def get_data_limit_megabytes_for_user(self, telegram_user) -> float | None:
+        key = self.get_key_for_user(telegram_user)
+        if not key:
+            raise OutlineServiceError("Для пользователя не найден ключ Outline")
+
+        data_limit = getattr(key, "data_limit", None)
+        if data_limit is None:
+            return None
+
+        return data_limit / BYTES_IN_MEGABYTE
 
     def delete_access_key_for_user(self, telegram_user) -> bool:
         key = self.get_key_for_user(telegram_user)

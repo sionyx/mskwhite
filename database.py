@@ -1,5 +1,7 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+SUBSCRIPTION_DURATION_DAYS = 30
 
 DB_PATH = "payments.db"
 
@@ -92,6 +94,23 @@ def get_expired_purchases(expires_before: datetime, db_path: str = DB_PATH) -> l
             """,
             (expires_before.isoformat(),),
         ).fetchall()
+
+
+def get_purchase_expiration_datetime(payment_datetime: str) -> datetime:
+    """Возвращает дату истечения подписки по времени покупки."""
+    purchase_datetime = datetime.fromisoformat(payment_datetime)
+    return purchase_datetime + timedelta(days=SUBSCRIPTION_DURATION_DAYS)
+
+
+def get_remaining_subscription_days(payment_datetime: str, now: datetime | None = None) -> int:
+    """Возвращает количество оставшихся полных дней подписки, включая текущий день."""
+    current_time = now or datetime.now(timezone.utc)
+    expiration_datetime = get_purchase_expiration_datetime(payment_datetime)
+    remaining_seconds = (expiration_datetime - current_time).total_seconds()
+    if remaining_seconds <= 0:
+        return 0
+
+    return max(1, int((remaining_seconds - 1) // (24 * 60 * 60)) + 1)
 
 
 def mark_purchase_expired(payment_id: str, db_path: str = DB_PATH) -> None:

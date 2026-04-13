@@ -5,10 +5,15 @@ from datetime import datetime, timedelta, timezone
 from telegram import User
 from telegram.ext import Application
 
-from database import get_expired_purchases, mark_purchase_expired, mark_purchase_overquota
+from database import (
+    SUBSCRIPTION_DURATION_DAYS,
+    get_expired_purchases,
+    mark_purchase_expired,
+    mark_purchase_overquota,
+)
 from outline_service import OutlineServiceError
 
-SUBSCRIPTION_DURATION = timedelta(days=30)
+SUBSCRIPTION_DURATION = timedelta(days=SUBSCRIPTION_DURATION_DAYS)
 
 
 def build_telegram_user(user_id: int, username: str | None) -> User:
@@ -145,7 +150,10 @@ async def check_overquota_subscriptions(application: Application) -> None:
 
         try:
             used_megabytes = outline_service.get_used_megabytes_for_user(telegram_user)
-            traffic_limit_mb = application.bot_data["traffic_limit_mb"]
+            traffic_limit_mb = outline_service.get_data_limit_megabytes_for_user(telegram_user)
+            if traffic_limit_mb is None:
+                traffic_limit_mb = application.bot_data["traffic_limit_mb"]
+
             if used_megabytes < traffic_limit_mb:
                 continue
 

@@ -3,7 +3,7 @@ import sqlite3
 import logging
 import argparse
 import asyncio
-from datetime import timedelta
+from datetime import timedelta, timezone
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice, User
 from telegram.ext import (
     Application,
@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 from database import (
     get_latest_purchase,
+    get_purchase_expiration_datetime,
+    get_remaining_subscription_days,
     init_database,
     mark_purchase_refunded,
     save_purchase,
@@ -41,6 +43,7 @@ admin_keyboard = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🛒 Купить доступ")],
         [KeyboardButton("🔑 Мой ключ")],
+        [KeyboardButton("📊 Мои лимиты")],
         [KeyboardButton("🔐 Выдать ключ")],
         [KeyboardButton("📋 Список пользователей")],
         [KeyboardButton("📥 Скачать Outline")],
@@ -53,6 +56,7 @@ user_keyboard = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🛒 Купить доступ")],
         [KeyboardButton("🔑 Мой ключ")],
+        [KeyboardButton("📊 Мои лимиты")],
         [KeyboardButton("📥 Скачать Outline")],
     ],
     resize_keyboard=True
@@ -196,6 +200,64 @@ async def my_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔑 Ваш текущий ключ Outline \\(нажмите, чтобы скопировать\\):\n\n"
         f"`{access_key}`",
         parse_mode="MarkdownV2",
+    )
+
+
+async def my_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает пользователю оставшийся срок подписки и доступный трафик."""
+    outline_service = context.application.bot_data.get("outline_service")
+    if not outline_service:
+        logging.error("OutlineService не инициализирован")
+        await update.message.reply_text(
+            "❌ Не удалось получить лимиты: сервис интеграции не настроен."
+        )
+        return
+
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("❌ Не удалось определить пользователя.")
+        return
+
+    purchase = get_latest_purchase(user.id)
+    if not purchase:
+        await update.message.reply_text(
+            "ℹ️ У вас нет активной подписки."
+        )
+        return
+
+    remaining_days = get_remaining_subscription_days(purchase["payment_datetime"])
+    if remaining_days <= 0:
+        expiration_datetime = get_purchase_expiration_datetime(purchase["payment_datetime"])
+        await update.message.reply_text(
+            "ℹ️ Срок вашей подписки уже истек.\n\n"
+            f"Дата окончания: {expiration_datetime.strftime('%d.%m.%Y')}"
+        )
+        return
+
+    try:
+        used_megabytes = outline_service.get_used_megabytes_for_user(user)
+        data_limit_megabytes = outline_service.get_data_limit_megabytes_for_user(user)
+    except OutlineServiceError as error:
+        logging.exception("Ошибка при получении лимитов пользователя %s: %s", user.id, error)
+        await update.message.reply_text(
+            "❌ Не удалось получить данные по лимитам. Попробуйте позже."
+        )
+        return
+
+    total_limit_megabytes = data_limit_megabytes
+    if total_limit_megabytes is None:
+        total_limit_megabytes = context.application.bot_data["traffic_limit_mb"]
+
+    expiration_datetime = get_purchase_expiration_datetime(purchase["payment_datetime"])
+    expiration_text = expiration_datetime.strftime('%d.%m.%Y')
+    used_gigabytes = used_megabytes / 1000
+    total_limit_gigabytes = total_limit_megabytes / 1000
+
+    await update.message.reply_text(
+        "📊 Ваши лимиты:\n\n"
+        f"⏳ Осталось дней: {remaining_days}\n"
+        f"📅 Подписка действует до: {expiration_text}\n"
+        f"📶 Использовано {used_gigabytes:.2f} ГБ из {total_limit_gigabytes:.2f} ГБ"
     )
 
 
@@ -659,6 +721,7 @@ def main():
     application.add_handler(CommandHandler("paysupport", paysupport_handler))
     application.add_handler(MessageHandler(filters.Text("🛒 Купить доступ"), buy_handler))
     application.add_handler(MessageHandler(filters.Text("🔑 Мой ключ"), my_key))
+    application.add_handler(MessageHandler(filters.Text("📊 Мои лимиты"), my_limits))
     application.add_handler(MessageHandler(filters.Text("🔐 Выдать ключ"), issue_key))
     application.add_handler(MessageHandler(filters.Text("📋 Список пользователей"), list_users))
     application.add_handler(MessageHandler(filters.Text("📥 Скачать Outline"), download_outline))
