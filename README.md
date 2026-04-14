@@ -49,17 +49,57 @@ cp .env.example .env
 
 ## Запуск бота
 
-### Production режим (по умолчанию)
+### Локальный запуск в Production режиме (по умолчанию)
 ```bash
 source venv/bin/activate && python bot.py
 ```
 
-### Тестовый режим
+### Локальный запуск в тестовом режиме
 ```bash
 source venv/bin/activate && python bot.py --test
 ```
 
 **Примечание:** В тестовом режиме бот использует тестовые токены (`TEST_BOT_TOKEN` и `TEST_PAYMENT_PROVIDER_TOKEN`) и подключается к тестовым серверам Telegram.
+
+## Запуск через Docker Compose
+1. Создайте файл `.env` на основе шаблона:
+```bash
+cp .env.example .env
+```
+
+2. При необходимости создайте пустой файл базы данных для bind-mount:
+```bash
+touch payments.db
+```
+
+3. Соберите и запустите контейнер:
+```bash
+docker compose up -d --build
+```
+
+4. Посмотрите логи бота:
+```bash
+docker compose logs -f bot
+```
+
+5. Для остановки контейнера выполните:
+```bash
+docker compose down
+```
+
+### Запуск в тестовом режиме через Docker Compose
+Для тестового режима переопределите команду сервиса:
+```bash
+docker compose run --rm bot python bot.py --test
+```
+
+### Что добавлено для Docker
+- `Dockerfile` — образ Python 3.11 со всеми зависимостями проекта
+- `docker-compose.yml` — запуск бота с переменными из `.env`
+- `.dockerignore` — исключение локальных и служебных файлов из контекста сборки
+
+### Хранение данных
+Файл базы данных SQLite `payments.db` подключается в контейнер как volume `./payments.db:/app/payments.db`, поэтому данные сохраняются между перезапусками контейнера.
 
 ## Проверка работы
 ### Проверка команды `/start`
@@ -91,6 +131,9 @@ source venv/bin/activate && python bot.py --test
 - `bot.py` - основной файл бота
 - `outline_service.py` - сервис интеграции с Outline API
 - `requirements.txt` - зависимости проекта
+- `Dockerfile` - описание Docker-образа
+- `docker-compose.yml` - конфигурация запуска контейнера
+- `.dockerignore` - исключения для Docker-контекста
 - `.env.example` - шаблон переменных окружения
 - `.env` - файл с реальными переменными окружения (создается пользователем)
 
