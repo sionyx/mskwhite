@@ -91,15 +91,12 @@ class OutlineService:
         return self._build_access_url(key_id)
 
     def get_key_for_user(self, telegram_user):
-        key_name = self._build_key_name(telegram_user)
-        logging.info(
-            "Поиск Outline access key для пользователя %s с именем %s",
-            telegram_user.id,
-            key_name,
-        )
+        user_id = str(telegram_user.id)
+        logging.info("Поиск Outline access key для пользователя %s по идентификатору", user_id)
 
         for key in self._get_keys():
-            if getattr(key, "name", None) == key_name:
+            key_name = getattr(key, "name", None) or ""
+            if key_name.startswith(f"tg-{user_id}-"):
                 return key
 
         return None
