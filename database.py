@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 SUBSCRIPTION_DURATION_DAYS = 30
 
@@ -139,3 +140,22 @@ def mark_purchase_overquota(payment_id: str, db_path: str = DB_PATH) -> None:
             (payment_id,),
         )
         connection.commit()
+
+
+def get_recent_purchases(days: int = 40, db_path: str = DB_PATH) -> list[dict[str, Any]]:
+    """Возвращает все записи о покупках за последние указанное количество дней."""
+    threshold_datetime = datetime.now(timezone.utc) - timedelta(days=days)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM purchases
+            WHERE payment_datetime >= ?
+            ORDER BY payment_datetime DESC, id DESC
+            """,
+            (threshold_datetime.isoformat(),),
+        ).fetchall()
+
+    return [dict(row) for row in rows]

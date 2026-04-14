@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from database import (
     get_latest_purchase,
     get_purchase_expiration_datetime,
+    get_recent_purchases,
     get_remaining_subscription_days,
     init_database,
     mark_purchase_refunded,
@@ -46,6 +47,7 @@ admin_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton("📊 Мои лимиты")],
         [KeyboardButton("🔐 Выдать ключ")],
         [KeyboardButton("📋 Список пользователей")],
+        [KeyboardButton("🧾 Список покупок")],
         [KeyboardButton("📥 Скачать Outline")],
     ],
     resize_keyboard=True
@@ -302,6 +304,38 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(candidate) > 4096:
             chunks.append(current_chunk.rstrip())
             current_chunk = f"{user}\n"
+        else:
+            current_chunk = candidate
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.rstrip())
+
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
+
+
+async def list_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выводит список записей из базы покупок за последние 40 дней."""
+    if not is_admin(update, context):
+        await deny_admin_access(update)
+        return
+
+    purchases = get_recent_purchases(days=40)
+    if not purchases:
+        await update.message.reply_text("🧾 За последние 40 дней покупок не найдено.")
+        return
+
+    lines = ["🧾 Покупки за последние 40 дней:", ""]
+    for purchase in purchases:
+        lines.append("; ".join(f"{key}={value}" for key, value in purchase.items()))
+
+    chunks = []
+    current_chunk = ""
+    for line in lines:
+        candidate = f"{current_chunk}{line}\n"
+        if len(candidate) > 4096:
+            chunks.append(current_chunk.rstrip())
+            current_chunk = f"{line}\n"
         else:
             current_chunk = candidate
 
@@ -724,6 +758,7 @@ def main():
     application.add_handler(MessageHandler(filters.Text("📊 Мои лимиты"), my_limits))
     application.add_handler(MessageHandler(filters.Text("🔐 Выдать ключ"), issue_key))
     application.add_handler(MessageHandler(filters.Text("📋 Список пользователей"), list_users))
+    application.add_handler(MessageHandler(filters.Text("🧾 Список покупок"), list_purchases))
     application.add_handler(MessageHandler(filters.Text("📥 Скачать Outline"), download_outline))
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
