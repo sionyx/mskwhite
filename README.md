@@ -26,6 +26,8 @@ cp .env.example .env
    - `TEST_PAYMENT_PROVIDER_TOKEN` - токен тестового платежного провайдера (опционально)
    - `OUTLINE_API_URL` - management API URL вашего Outline-сервера
    - `OUTLINE_CERT_SHA256` - SHA-256 fingerprint сертификата Outline API
+   - `TELEGRAM_API_RETRIES` - количество повторных попыток при сетевых ошибках Telegram API, по умолчанию `3`
+   - `TELEGRAM_API_RETRY_DELAY_SECONDS` - задержка между попытками в секундах, по умолчанию `3`
 
 ## Получение токенов
 ### Токен бота

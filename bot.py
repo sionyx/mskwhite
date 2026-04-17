@@ -5,6 +5,7 @@ import argparse
 import asyncio
 from datetime import timedelta, timezone
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice, User
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,6 +30,9 @@ from subscription_checks import check_overquota_subscriptions, expire_subscripti
 
 EXPIRATION_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_TRAFFIC_LIMIT_MB = 100 * 1000
+
+DEFAULT_TELEGRAM_API_RETRIES = 3
+DEFAULT_TELEGRAM_API_RETRY_DELAY_SECONDS = 3.0
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -118,6 +122,93 @@ def get_traffic_limit_mb() -> float:
 
 
 
+def get_telegram_api_retries() -> int:
+    """Возвращает количество повторных попыток для запросов к Telegram API."""
+    raw_value = os.getenv("TELEGRAM_API_RETRIES", str(DEFAULT_TELEGRAM_API_RETRIES)).strip()
+
+    try:
+        retries = int(raw_value)
+    except ValueError as error:
+        raise ValueError("TELEGRAM_API_RETRIES должен быть целым числом") from error
+
+    if retries < 1:
+        raise ValueError("TELEGRAM_API_RETRIES должен быть не меньше 1")
+
+    return retries
+
+
+
+def get_telegram_api_retry_delay_seconds() -> float:
+    """Возвращает задержку между повторными попытками запросов к Telegram API."""
+    raw_value = os.getenv(
+        "TELEGRAM_API_RETRY_DELAY_SECONDS",
+        str(DEFAULT_TELEGRAM_API_RETRY_DELAY_SECONDS),
+    ).strip()
+
+    try:
+        delay_seconds = float(raw_value)
+    except ValueError as error:
+        raise ValueError("TELEGRAM_API_RETRY_DELAY_SECONDS должен быть числом") from error
+
+    if delay_seconds < 0:
+        raise ValueError("TELEGRAM_API_RETRY_DELAY_SECONDS не может быть отрицательным")
+
+    return delay_seconds
+
+
+
+async def telegram_api_call_with_retries(
+    operation,
+    *,
+    operation_name: str,
+    retries: int,
+    retry_delay_seconds: float,
+):
+    """Выполняет вызов Telegram API с повторными попытками при сетевых ошибках."""
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            return await operation()
+        except RetryAfter as error:
+            last_error = error
+            if attempt == retries:
+                break
+
+            wait_seconds = max(float(error.retry_after), retry_delay_seconds)
+            logging.warning(
+                "Telegram API retry_after во время %s. Попытка %s/%s, ожидание %.2f сек.",
+                operation_name,
+                attempt,
+                retries,
+                wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+        except (NetworkError, TimedOut) as error:
+            last_error = error
+            if attempt == retries:
+                break
+
+            logging.warning(
+                "Сетевая ошибка Telegram API во время %s. Попытка %s/%s через %.2f сек.: %s",
+                operation_name,
+                attempt,
+                retries,
+                retry_delay_seconds,
+                error,
+            )
+            await asyncio.sleep(retry_delay_seconds)
+
+    logging.exception(
+        "Не удалось выполнить %s после %s попыток",
+        operation_name,
+        retries,
+        exc_info=last_error,
+    )
+    raise last_error
+
+
+
 def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Проверяет, является ли пользователь администратором бота."""
     admin_user_id = context.application.bot_data.get("admin_user_id")
@@ -126,9 +217,147 @@ def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return bool(user and admin_user_id is not None and user.id == admin_user_id)
 
 
+def get_telegram_retry_settings(application: Application | None) -> tuple[int, float]:
+    """Возвращает настройки повторных попыток Telegram API из bot_data."""
+    if application is None:
+        return DEFAULT_TELEGRAM_API_RETRIES, DEFAULT_TELEGRAM_API_RETRY_DELAY_SECONDS
+
+    retries = application.bot_data.get("telegram_api_retries", DEFAULT_TELEGRAM_API_RETRIES)
+    retry_delay_seconds = application.bot_data.get(
+        "telegram_api_retry_delay_seconds",
+        DEFAULT_TELEGRAM_API_RETRY_DELAY_SECONDS,
+    )
+    return retries, retry_delay_seconds
+
+
+
+async def reply_text_with_retries(
+    message,
+    text: str,
+    *,
+    operation_name: str,
+    **kwargs,
+):
+    """Отправляет reply_text с повторными попытками при сетевых ошибках Telegram API."""
+    if not message:
+        return None
+
+    application = getattr(message, "_application", None)
+    retries, retry_delay_seconds = get_telegram_retry_settings(application)
+
+    return await telegram_api_call_with_retries(
+        lambda: message.reply_text(text, **kwargs),
+        operation_name=operation_name,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+
+async def send_message_with_retries(
+    bot,
+    chat_id: int,
+    text: str,
+    *,
+    operation_name: str,
+    **kwargs,
+):
+    """Отправляет send_message с повторными попытками при сетевых ошибках Telegram API."""
+    application = getattr(bot, "_application", None)
+    retries, retry_delay_seconds = get_telegram_retry_settings(application)
+
+    return await telegram_api_call_with_retries(
+        lambda: bot.send_message(chat_id=chat_id, text=text, **kwargs),
+        operation_name=operation_name,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+
+async def send_invoice_with_retries(
+    bot,
+    *,
+    operation_name: str,
+    **kwargs,
+):
+    """Отправляет invoice с повторными попытками при сетевых ошибках Telegram API."""
+    application = getattr(bot, "_application", None)
+    retries, retry_delay_seconds = get_telegram_retry_settings(application)
+
+    return await telegram_api_call_with_retries(
+        lambda: bot.send_invoice(**kwargs),
+        operation_name=operation_name,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+
+async def refund_star_payment_with_retries(
+    bot,
+    *,
+    operation_name: str,
+    **kwargs,
+):
+    """Выполняет refund_star_payment с повторными попытками при сетевых ошибках Telegram API."""
+    application = getattr(bot, "_application", None)
+    retries, retry_delay_seconds = get_telegram_retry_settings(application)
+
+    return await telegram_api_call_with_retries(
+        lambda: bot.refund_star_payment(**kwargs),
+        operation_name=operation_name,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+
+async def answer_pre_checkout_query_with_retries(
+    query,
+    *,
+    operation_name: str,
+    **kwargs,
+):
+    """Отвечает на pre-checkout query с повторными попытками при сетевых ошибках Telegram API."""
+    application = getattr(query, "_application", None)
+    retries, retry_delay_seconds = get_telegram_retry_settings(application)
+
+    return await telegram_api_call_with_retries(
+        lambda: query.answer(**kwargs),
+        operation_name=operation_name,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+
+async def forward_message_with_retries(
+    message,
+    *,
+    operation_name: str,
+    **kwargs,
+):
+    """Пересылает сообщение с повторными попытками при сетевых ошибках Telegram API."""
+    application = getattr(message, "_application", None)
+    retries, retry_delay_seconds = get_telegram_retry_settings(application)
+
+    return await telegram_api_call_with_retries(
+        lambda: message.forward(**kwargs),
+        operation_name=operation_name,
+        retries=retries,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+
 async def deny_admin_access(update: Update):
     """Сообщает пользователю об отсутствии доступа к административной команде."""
-    await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+    await reply_text_with_retries(
+        update.message,
+        "⛔ Эта команда доступна только администратору.",
+        operation_name="deny_admin_access.reply_text",
+    )
 
 async def issue_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Создает и отправляет пользователю Outline access key без оплаты."""
@@ -141,32 +370,42 @@ async def _issue_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     outline_service = context.application.bot_data.get("outline_service")
     if not outline_service:
         logging.error("OutlineService не инициализирован")
-        await update.message.reply_text(
-            "❌ Не удалось подготовить доступ Outline: сервис интеграции не настроен."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось подготовить доступ Outline: сервис интеграции не настроен.",
+            operation_name="_issue_key.outline_service_missing.reply_text",
         )
         return
 
-    await update.message.reply_text("🔄 Создаем для вас ключ доступа Outline...")
+    await reply_text_with_retries(
+        update.message,
+        "🔄 Создаем для вас ключ доступа Outline...",
+        operation_name="_issue_key.progress.reply_text",
+    )
 
     try:
         access_key = outline_service.create_access_key(update.effective_user)
     except OutlineServiceError as error:
         logging.exception("Ошибка при создании Outline access key: %s", error)
-        await update.message.reply_text(
-            "❌ Не удалось создать доступ Outline. Попробуйте позже."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось создать доступ Outline. Попробуйте позже.",
+            operation_name="_issue_key.outline_error.reply_text",
         )
         return
 
     limit_mb = context.application.bot_data["pay_support_limit_mb"]
 
     logging.info("Outline access key успешно создан для пользователя %s", update.effective_user.id)
-    await update.message.reply_text(
+    await reply_text_with_retries(
+        update.message,
         "🔐 Ключ Outline успешно создан \\(нажмите, чтобы скопировать\\):\n\n"
         f"`{access_key}`"
         "\n\n🛜 Для подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить. После этого можете активировать VPN кнопкой Подключить."
         "\n\n📥 Если у вас нет приложения Outline, вы можете его скачать воспользовавшись командой /download"
-        f"\n\n⏳ Вы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport",
-        f"\n\n🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ",
+        f"\n\n⏳ Вы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport"
+        "\n\n🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ",
+        operation_name="_issue_key.success.reply_text",
         parse_mode="MarkdownV2",
     )
 
@@ -176,31 +415,43 @@ async def my_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     outline_service = context.application.bot_data.get("outline_service")
     if not outline_service:
         logging.error("OutlineService не инициализирован")
-        await update.message.reply_text(
-            "❌ Не удалось получить ключ Outline: сервис интеграции не настроен."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось получить ключ Outline: сервис интеграции не настроен.",
+            operation_name="my_key.outline_service_missing.reply_text",
         )
         return
 
-    await update.message.reply_text("🔄 Ищем ваш текущий ключ Outline...")
+    await reply_text_with_retries(
+        update.message,
+        "🔄 Ищем ваш текущий ключ Outline...",
+        operation_name="my_key.progress.reply_text",
+    )
 
     try:
         access_key = outline_service.get_access_key_for_user(update.effective_user)
     except OutlineServiceError as error:
         logging.exception("Ошибка при поиске Outline access key: %s", error)
-        await update.message.reply_text(
-            "❌ Не удалось получить ваш ключ Outline. Попробуйте позже."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось получить ваш ключ Outline. Попробуйте позже.",
+            operation_name="my_key.outline_error.reply_text",
         )
         return
 
     if not access_key:
-        await update.message.reply_text(
-            "ℹ️ Для вашего аккаунта пока нет активного ключа Outline."
+        await reply_text_with_retries(
+            update.message,
+            "ℹ️ Для вашего аккаунта пока нет активного ключа Outline.",
+            operation_name="my_key.not_found.reply_text",
         )
         return
 
-    await update.message.reply_text(
+    await reply_text_with_retries(
+        update.message,
         "🔑 Ваш текущий ключ Outline \\(нажмите, чтобы скопировать\\):\n\n"
         f"`{access_key}`",
+        operation_name="my_key.success.reply_text",
         parse_mode="MarkdownV2",
     )
 
@@ -210,29 +461,39 @@ async def my_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     outline_service = context.application.bot_data.get("outline_service")
     if not outline_service:
         logging.error("OutlineService не инициализирован")
-        await update.message.reply_text(
-            "❌ Не удалось получить лимиты: сервис интеграции не настроен."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось получить лимиты: сервис интеграции не настроен.",
+            operation_name="my_limits.outline_service_missing.reply_text",
         )
         return
 
     user = update.effective_user
     if not user:
-        await update.message.reply_text("❌ Не удалось определить пользователя.")
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось определить пользователя.",
+            operation_name="my_limits.user_missing.reply_text",
+        )
         return
 
     purchase = get_latest_purchase(user.id)
     if not purchase:
-        await update.message.reply_text(
-            "ℹ️ У вас нет активной подписки."
+        await reply_text_with_retries(
+            update.message,
+            "ℹ️ У вас нет активной подписки.",
+            operation_name="my_limits.no_purchase.reply_text",
         )
         return
 
     remaining_days = get_remaining_subscription_days(purchase["payment_datetime"])
     if remaining_days <= 0:
         expiration_datetime = get_purchase_expiration_datetime(purchase["payment_datetime"])
-        await update.message.reply_text(
+        await reply_text_with_retries(
+            update.message,
             "ℹ️ Срок вашей подписки уже истек.\n\n"
-            f"Дата окончания: {expiration_datetime.strftime('%d.%m.%Y')}"
+            f"Дата окончания: {expiration_datetime.strftime('%d.%m.%Y')}",
+            operation_name="my_limits.expired.reply_text",
         )
         return
 
@@ -241,8 +502,10 @@ async def my_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_limit_megabytes = outline_service.get_data_limit_megabytes_for_user(user)
     except OutlineServiceError as error:
         logging.exception("Ошибка при получении лимитов пользователя %s: %s", user.id, error)
-        await update.message.reply_text(
-            "❌ Не удалось получить данные по лимитам. Попробуйте позже."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось получить данные по лимитам. Попробуйте позже.",
+            operation_name="my_limits.outline_error.reply_text",
         )
         return
 
@@ -255,11 +518,13 @@ async def my_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     used_gigabytes = used_megabytes / 1000
     total_limit_gigabytes = total_limit_megabytes / 1000
 
-    await update.message.reply_text(
+    await reply_text_with_retries(
+        update.message,
         "📊 Ваши лимиты:\n\n"
         f"⏳ Осталось дней: {remaining_days}\n"
         f"📅 Подписка действует до: {expiration_text}\n"
-        f"📶 Использовано {used_gigabytes:.2f} ГБ из {total_limit_gigabytes:.2f} ГБ"
+        f"📶 Использовано {used_gigabytes:.2f} ГБ из {total_limit_gigabytes:.2f} ГБ",
+        operation_name="my_limits.success.reply_text",
     )
 
 
@@ -272,29 +537,45 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     outline_service = context.application.bot_data.get("outline_service")
     if not outline_service:
         logging.error("OutlineService не инициализирован")
-        await update.message.reply_text(
-            "❌ Не удалось получить список пользователей: сервис интеграции не настроен."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось получить список пользователей: сервис интеграции не настроен.",
+            operation_name="list_users.outline_service_missing.reply_text",
         )
         return
 
-    await update.message.reply_text("🔄 Получаем список пользователей Outline...")
+    await reply_text_with_retries(
+        update.message,
+        "🔄 Получаем список пользователей Outline...",
+        operation_name="list_users.progress.reply_text",
+    )
 
     try:
         users = outline_service.list_access_keys()
     except OutlineServiceError as error:
         logging.exception("Ошибка при получении списка пользователей Outline: %s", error)
-        await update.message.reply_text(
-            "❌ Не удалось получить список пользователей Outline. Попробуйте позже."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось получить список пользователей Outline. Попробуйте позже.",
+            operation_name="list_users.outline_error.reply_text",
         )
         return
 
     if not users:
-        await update.message.reply_text("📋 В Outline пока нет пользователей.")
+        await reply_text_with_retries(
+            update.message,
+            "📋 В Outline пока нет пользователей.",
+            operation_name="list_users.empty.reply_text",
+        )
         return
 
     message = "📋 Список пользователей Outline:\n\n" + "\n".join(users)
     if len(message) <= 4096:
-        await update.message.reply_text(message)
+        await reply_text_with_retries(
+            update.message,
+            message,
+            operation_name="list_users.single_chunk.reply_text",
+        )
         return
 
     chunks = []
@@ -310,8 +591,12 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_chunk.strip():
         chunks.append(current_chunk.rstrip())
 
-    for chunk in chunks:
-        await update.message.reply_text(chunk)
+    for index, chunk in enumerate(chunks, start=1):
+        await reply_text_with_retries(
+            update.message,
+            chunk,
+            operation_name=f"list_users.chunk_{index}.reply_text",
+        )
 
 
 async def list_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -322,7 +607,11 @@ async def list_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     purchases = get_recent_purchases(days=40)
     if not purchases:
-        await update.message.reply_text("🧾 За последние 40 дней покупок не найдено.")
+        await reply_text_with_retries(
+            update.message,
+            "🧾 За последние 40 дней покупок не найдено.",
+            operation_name="list_purchases.empty.reply_text",
+        )
         return
 
     lines = ["🧾 Покупки за последние 40 дней:", ""]
@@ -342,8 +631,12 @@ async def list_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_chunk.strip():
         chunks.append(current_chunk.rstrip())
 
-    for chunk in chunks:
-        await update.message.reply_text(chunk)
+    for index, chunk in enumerate(chunks, start=1):
+        await reply_text_with_retries(
+            update.message,
+            chunk,
+            operation_name=f"list_purchases.chunk_{index}.reply_text",
+        )
 
 
 async def download_outline(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,7 +650,11 @@ async def download_outline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Linux: https://s3.amazonaws.com/outline-releases/client/linux/stable/Outline-Client.AppImage\n"
         "• Официальная страница: https://getoutline.org/get-started/#step-3"
     )
-    await update.message.reply_text(download_text)
+    await reply_text_with_retries(
+        update.message,
+        download_text,
+        operation_name="download_outline.reply_text",
+    )
 
 
 async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -365,20 +662,28 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     outline_service = context.application.bot_data.get("outline_service")
     if not outline_service:
         logging.error("OutlineService не инициализирован")
-        await update.message.reply_text(
-            "❌ Не удалось обработать запрос на возврат: сервис Outline недоступен."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось обработать запрос на возврат: сервис Outline недоступен.",
+            operation_name="paysupport.outline_service_missing.reply_text",
         )
         return
 
     user = update.effective_user
     if not user:
-        await update.message.reply_text("❌ Не удалось определить пользователя.")
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось определить пользователя.",
+            operation_name="paysupport.user_missing.reply_text",
+        )
         return
 
     purchase = get_latest_purchase(user.id)
     if not purchase:
-        await update.message.reply_text(
-            "ℹ️ Для вашего аккаунта не найдено оплаченных покупок, доступных для возврата."
+        await reply_text_with_retries(
+            update.message,
+            "ℹ️ Для вашего аккаунта не найдено оплаченных покупок, доступных для возврата.",
+            operation_name="paysupport.no_purchase.reply_text",
         )
         return
 
@@ -386,23 +691,29 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         used_megabytes = outline_service.get_used_megabytes_for_user(user)
     except OutlineServiceError as error:
         logging.exception("Ошибка при получении трафика пользователя %s: %s", user.id, error)
-        await update.message.reply_text(
-            "❌ Не удалось проверить использованный трафик. Попробуйте позже."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось проверить использованный трафик. Попробуйте позже.",
+            operation_name="paysupport.traffic_error.reply_text",
         )
         return
 
     limit_mb = context.application.bot_data["pay_support_limit_mb"]
     if used_megabytes >= limit_mb:
-        await update.message.reply_text(
+        await reply_text_with_retries(
+            update.message,
             "ℹ️ Услуга считается предоставленной: использовано "
-            f"{used_megabytes:.2f} МБ при лимите возврата {limit_mb:.2f} МБ."
+            f"{used_megabytes:.2f} МБ при лимите возврата {limit_mb:.2f} МБ.",
+            operation_name="paysupport.limit_exceeded.reply_text",
         )
         return
 
     payment_id = purchase["payment_id"]
 
     try:
-        await context.bot.refund_star_payment(
+        await refund_star_payment_with_retries(
+            context.bot,
+            operation_name="paysupport.refund_star_payment",
             user_id=user.id,
             telegram_payment_charge_id=payment_id,
         )
@@ -410,25 +721,33 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         outline_service.delete_access_key_for_user(user)
     except sqlite3.Error as error:
         logging.exception("Ошибка при обновлении статуса платежа %s: %s", payment_id, error)
-        await update.message.reply_text(
-            "❌ Возврат выполнен, но не удалось обновить статус в локальной базе."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Возврат выполнен, но не удалось обновить статус в локальной базе.",
+            operation_name="paysupport.sqlite_error.reply_text",
         )
         return
     except OutlineServiceError as error:
         logging.exception("Ошибка при удалении ключа Outline для пользователя %s: %s", user.id, error)
-        await update.message.reply_text(
-            "❌ Возврат выполнен, но не удалось удалить ключ Outline."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Возврат выполнен, но не удалось удалить ключ Outline.",
+            operation_name="paysupport.outline_delete_error.reply_text",
         )
         return
     except Exception as error:
         logging.exception("Ошибка при возврате платежа %s: %s", payment_id, error)
-        await update.message.reply_text(
-            "❌ Не удалось выполнить возврат платежа. Попробуйте позже."
+        await reply_text_with_retries(
+            update.message,
+            "❌ Не удалось выполнить возврат платежа. Попробуйте позже.",
+            operation_name="paysupport.refund_error.reply_text",
         )
         return
 
-    await update.message.reply_text(
-        "✅ Возврат платежа выполнен. Доступ Outline удален."
+    await reply_text_with_retries(
+        update.message,
+        "✅ Возврат платежа выполнен. Доступ Outline удален.",
+        operation_name="paysupport.success.reply_text",
     )
 
 
@@ -449,7 +768,12 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """.strip()
 
     reply_markup = admin_keyboard if is_admin(update, context) else user_keyboard
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    await reply_text_with_retries(
+        update.message,
+        welcome_text,
+        operation_name="start_handler.reply_text",
+        reply_markup=reply_markup,
+    )
 
 async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопки покупки - отправка инвойса на стоимость из конфигурации."""
@@ -461,8 +785,10 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active_purchase:
         if not outline_service:
             logging.error("OutlineService не инициализирован")
-            await update.message.reply_text(
-                "⚠️ У вас уже есть активная покупка, но сейчас не удалось получить ключ Outline."
+            await reply_text_with_retries(
+                update.message,
+                "⚠️ У вас уже есть активная покупка, но сейчас не удалось получить ключ Outline.",
+                operation_name="buy_handler.active_purchase.outline_service_missing.reply_text",
             )
             return
 
@@ -470,19 +796,28 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             access_key = outline_service.get_access_key_for_user(user)
         except OutlineServiceError as error:
             logging.exception("Ошибка при получении активного ключа Outline: %s", error)
-            await update.message.reply_text(
-                "⚠️ У вас уже есть активная покупка, но не удалось получить текущий ключ. Попробуйте позже."
+            await reply_text_with_retries(
+                update.message,
+                "⚠️ У вас уже есть активная покупка, но не удалось получить текущий ключ. Попробуйте позже.",
+                operation_name="buy_handler.active_purchase.outline_error.reply_text",
             )
             return
 
         warning_text = "⚠️ У вас уже есть активная оплаченная покупка"
         if access_key:
             warning_text += f"\n\nВаш активный ключ Outline:\n\n`{access_key}`"
-            await update.message.reply_text(warning_text, parse_mode="MarkdownV2")
+            await reply_text_with_retries(
+                update.message,
+                warning_text,
+                operation_name="buy_handler.active_purchase.with_key.reply_text",
+                parse_mode="MarkdownV2",
+            )
             return
 
-        await update.message.reply_text(
-            warning_text + "\n\nАктивный ключ не найден. Используйте команду /paysupport или обратитесь к администратору."
+        await reply_text_with_retries(
+            update.message,
+            warning_text + "\n\nАктивный ключ не найден. Используйте команду /paysupport или обратитесь к администратору.",
+            operation_name="buy_handler.active_purchase.no_key.reply_text",
         )
         return
 
@@ -500,7 +835,9 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = [LabeledPrice("VPN доступ", price)]
 
     try:
-        await context.bot.send_invoice(
+        await send_invoice_with_retries(
+            context.bot,
+            operation_name="buy_handler.send_invoice",
             chat_id=chat_id,
             title=title,
             description=description,
@@ -508,11 +845,15 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             provider_token=provider_token,
             currency=currency,
             prices=prices,
-            start_parameter="vpn_purchase"
+            start_parameter="vpn_purchase",
         )
-    except Exception as e:
-        logging.error(f"Ошибка при отправке инвойса: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при создании счета. Попробуйте позже.")
+    except Exception as error:
+        logging.error("Ошибка при отправке инвойса: %s", error)
+        await reply_text_with_retries(
+            update.message,
+            "❌ Произошла ошибка при создании счета. Попробуйте позже.",
+            operation_name="buy_handler.send_invoice_error.reply_text",
+        )
 
 async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Подтверждает pre-checkout запрос перед списанием Telegram Stars."""
@@ -520,10 +861,19 @@ async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if query.invoice_payload != "vpn_access_purchase":
         logging.warning("Получен неизвестный payload в pre-checkout: %s", query.invoice_payload)
-        await query.answer(ok=False, error_message="❌ Не удалось подтвердить платеж. Попробуйте начать покупку заново.")
+        await answer_pre_checkout_query_with_retries(
+            query,
+            operation_name="pre_checkout_handler.invalid_payload.answer",
+            ok=False,
+            error_message="❌ Не удалось подтвердить платеж. Попробуйте начать покупку заново.",
+        )
         return
 
-    await query.answer(ok=True)
+    await answer_pre_checkout_query_with_retries(
+        query,
+        operation_name="pre_checkout_handler.success.answer",
+        ok=True,
+    )
     logging.info("Pre-checkout подтвержден для пользователя %s", query.from_user.id)
 
 
@@ -553,9 +903,11 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     except sqlite3.Error as error:
         logging.exception("Не удалось сохранить платеж в SQLite: %s", error)
 
-    await update.message.reply_text(
+    await reply_text_with_retries(
+        update.message,
         "✅ Покупка подтверждена!\n\n"
-        "Платеж успешно получен, создаем для вас ключ доступа Outline."
+        "Платеж успешно получен, создаем для вас ключ доступа Outline.",
+        operation_name="successful_payment_handler.reply_text",
     )
 
     await _issue_key(update, context)
@@ -613,21 +965,29 @@ async def forward_user_message_to_admin(update: Update, context: ContextTypes.DE
     if user.id == admin_user_id:
         return
 
-    await context.bot.send_message(
-        chat_id=admin_user_id,
-        text=(
+    await send_message_with_retries(
+        context.bot,
+        admin_user_id,
+        (
             "📩 Новое сообщение от пользователя\n"
             f"👤 {format_user_mention(user)}"
         ),
+        operation_name="forward_user_message_to_admin.notify_admin.send_message",
     )
 
-    forwarded_message = await message.forward(chat_id=admin_user_id)
+    forwarded_message = await forward_message_with_retries(
+        message,
+        chat_id=admin_user_id,
+        operation_name="forward_user_message_to_admin.forward",
+    )
     context.application.bot_data.setdefault("forwarded_messages", {})[
         forwarded_message.message_id
     ] = user.id
 
-    await message.reply_text(
-        "✅ Ваше сообщение отправлено администратору. Ответ придет сюда от имени бота."
+    await reply_text_with_retries(
+        message,
+        "✅ Ваше сообщение отправлено администратору. Ответ придет сюда от имени бота.",
+        operation_name="forward_user_message_to_admin.confirm.reply_text",
     )
 
 
@@ -649,25 +1009,37 @@ async def relay_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = message.text or message.caption
     if not reply_text:
-        await message.reply_text(
-            "⚠️ Сейчас можно пересылать пользователю только текстовые ответы администратора."
+        await reply_text_with_retries(
+            message,
+            "⚠️ Сейчас можно пересылать пользователю только текстовые ответы администратора.",
+            operation_name="relay_admin_reply.non_text.reply_text",
         )
         return
 
-    await context.bot.send_message(
-        chat_id=target_user_id,
-        text=(
+    await send_message_with_retries(
+        context.bot,
+        target_user_id,
+        (
             "💬 Ответ администратора:\n\n"
             f"{reply_text}"
         ),
+        operation_name="relay_admin_reply.send_message",
     )
 
-    await message.reply_text("✅ Ответ отправлен пользователю.")
+    await reply_text_with_retries(
+        message,
+        "✅ Ответ отправлен пользователю.",
+        operation_name="relay_admin_reply.confirm.reply_text",
+    )
 
 
 async def unknown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик неизвестных команд"""
-    await update.message.reply_text("Извините, я не понимаю эту команду. Используйте /start для начала работы.")
+    await reply_text_with_retries(
+        update.message,
+        "Извините, я не понимаю эту команду. Используйте /start для начала работы.",
+        operation_name="unknown_handler.reply_text",
+    )
 
 def main():
     """Основная функция запуска бота"""
@@ -713,6 +1085,8 @@ def main():
         pay_support_limit_mb = get_pay_support_limit_mb()
         subscription_price_stars = get_subscription_price_stars()
         traffic_limit_mb = get_traffic_limit_mb()
+        telegram_api_retries = get_telegram_api_retries()
+        telegram_api_retry_delay_seconds = get_telegram_api_retry_delay_seconds()
     except ValueError as error:
         logging.error("Некорректное значение переменной окружения: %s", error)
         print(f"❌ Ошибка: {error}")
@@ -741,6 +1115,8 @@ def main():
     application.bot_data['pay_support_limit_mb'] = pay_support_limit_mb
     application.bot_data['subscription_price_stars'] = subscription_price_stars
     application.bot_data['traffic_limit_mb'] = traffic_limit_mb
+    application.bot_data['telegram_api_retries'] = telegram_api_retries
+    application.bot_data['telegram_api_retry_delay_seconds'] = telegram_api_retry_delay_seconds
 
     try:
         application.bot_data['outline_service'] = OutlineService.from_env()

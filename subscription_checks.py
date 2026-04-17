@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from telegram import User
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application
 
 from database import (
@@ -14,6 +16,59 @@ from database import (
 from outline_service import OutlineServiceError
 
 SUBSCRIPTION_DURATION = timedelta(days=SUBSCRIPTION_DURATION_DAYS)
+
+
+async def telegram_api_call_with_retries(
+    application: Application,
+    operation,
+    *,
+    operation_name: str,
+):
+    """Выполняет вызов Telegram API с повторными попытками при сетевых ошибках."""
+    retries = application.bot_data["telegram_api_retries"]
+    retry_delay_seconds = application.bot_data["telegram_api_retry_delay_seconds"]
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            return await operation()
+        except RetryAfter as error:
+            last_error = error
+            if attempt == retries:
+                break
+
+            wait_seconds = max(float(error.retry_after), retry_delay_seconds)
+            logging.warning(
+                "Telegram API retry_after во время %s. Попытка %s/%s, ожидание %.2f сек.",
+                operation_name,
+                attempt,
+                retries,
+                wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+        except (NetworkError, TimedOut) as error:
+            last_error = error
+            if attempt == retries:
+                break
+
+            logging.warning(
+                "Сетевая ошибка Telegram API во время %s. Попытка %s/%s через %.2f сек.: %s",
+                operation_name,
+                attempt,
+                retries,
+                retry_delay_seconds,
+                error,
+            )
+            await asyncio.sleep(retry_delay_seconds)
+
+    logging.exception(
+        "Не удалось выполнить %s после %s попыток",
+        operation_name,
+        retries,
+        exc_info=last_error,
+    )
+    raise last_error
+
 
 
 def build_telegram_user(user_id: int, username: str | None) -> User:
@@ -39,14 +94,18 @@ async def notify_admin_key_revoked(
         return
 
     user_label = format_user_label(user_id, username)
-    await application.bot.send_message(
-        chat_id=admin_user_id,
-        text=(
-            "🔒 Ключ пользователя отозван\n\n"
-            f"Пользователь: {user_label}\n"
-            f"Причина: {reason}"
+    await telegram_api_call_with_retries(
+        application,
+        lambda: application.bot.send_message(
+            chat_id=admin_user_id,
+            text=(
+                "🔒 Ключ пользователя отозван\n\n"
+                f"Пользователь: {user_label}\n"
+                f"Причина: {reason}"
+            ),
+            parse_mode="MarkdownV2",
         ),
-        parse_mode="MarkdownV2",
+        operation_name="notify_admin_key_revoked.send_message",
     )
 
 
@@ -86,13 +145,17 @@ async def expire_subscriptions(application: Application) -> None:
         telegram_user = build_telegram_user(user_id, username)
 
         try:
-            await application.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "⏰ Срок вашей подписки истек.\n\n"
-                    "Текущий ключ Outline деактивирован. Чтобы продолжить пользоваться сервисом, "
-                    "оформите новую покупку."
+            await telegram_api_call_with_retries(
+                application,
+                lambda: application.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "⏰ Срок вашей подписки истек.\n\n"
+                        "Текущий ключ Outline деактивирован. Чтобы продолжить пользоваться сервисом, "
+                        "оформите новую покупку."
+                    ),
                 ),
+                operation_name="expire_subscriptions.send_message",
             )
             outline_service.delete_access_key_for_user(telegram_user)
             mark_purchase_expired(payment_id)
@@ -157,13 +220,17 @@ async def check_overquota_subscriptions(application: Application) -> None:
             if used_megabytes < traffic_limit_mb:
                 continue
 
-            await application.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "📶 Лимит трафика по вашей подписке исчерпан.\n\n"
-                    "Текущий ключ Outline деактивирован. Чтобы продолжить пользоваться сервисом, "
-                    "оформите новую покупку."
+            await telegram_api_call_with_retries(
+                application,
+                lambda: application.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "📶 Лимит трафика по вашей подписке исчерпан.\n\n"
+                        "Текущий ключ Outline деактивирован. Чтобы продолжить пользоваться сервисом, "
+                        "оформите новую покупку."
+                    ),
                 ),
+                operation_name="check_overquota_subscriptions.send_message",
             )
             outline_service.delete_access_key_for_user(telegram_user)
             mark_purchase_overquota(payment_id)
