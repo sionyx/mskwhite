@@ -750,6 +750,12 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    await notify_admin_subscription_refunded(
+        context,
+        user,
+        payment_id=payment_id,
+    )
+
     await reply_text_with_retries(
         update.message,
         "✅ Возврат платежа выполнен. Доступ Outline удален.",
@@ -1012,6 +1018,30 @@ async def notify_admin_subscription_purchased(update: Update, context: ContextTy
             f"🧾 Payment ID: {payment.telegram_payment_charge_id}"
         ),
         operation_name="notify_admin_subscription_purchased.send_message",
+    )
+
+
+async def notify_admin_subscription_refunded(
+    context: ContextTypes.DEFAULT_TYPE,
+    user: User,
+    *,
+    payment_id: str,
+):
+    """Уведомляет администратора о возврате покупки пользователю."""
+    admin_user_id = context.application.bot_data.get("admin_user_id")
+
+    if admin_user_id is None:
+        return
+
+    await send_message_with_retries(
+        context.bot,
+        admin_user_id,
+        (
+            "↩️ Пользователю оформлен возврат\n\n"
+            f"👤 {format_user_mention(user)}\n"
+            f"🧾 Payment ID: {payment_id}"
+        ),
+        operation_name="notify_admin_subscription_refunded.send_message",
     )
 
 
