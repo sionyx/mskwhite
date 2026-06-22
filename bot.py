@@ -1054,6 +1054,9 @@ async def forward_user_message_to_admin(update: Update, context: ContextTypes.DE
     if not message or not user or admin_user_id is None:
         return
 
+    if message.from_user and message.from_user.is_bot:
+        return
+
     if user.id == admin_user_id:
         return
 
