@@ -758,11 +758,19 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = f"""
 👋 Добро пожаловать в VPN-сервис Москва Белокаменная!
 
-Мы предоставляем надежный VPN-доступ через Outline который работает в условиях "белых списков".
+Мы предоставляем надежный VPN-доступ через Outline который работает даже в условиях "белых списков" и с российскими приложениями.
 
 ⭐ Стоимость доступа: {subscription_price_stars} Telegram Stars на месяц. Ограничение трафика {traffic_limit_mb:.0f} ГБ.
 
-Нажмите кнопку ниже, чтобы начать покупку или получите уже оплаченный ключ.
+ℹ️ После покупки вы можете проверить работу сервиса и вернуть звезды, в случае, если что-то работает не так.
+
+Нажмите кнопку ниже👇, чтобы начать покупку или получите уже оплаченный ключ.
+
+🤔 Ой, а как все настроить? Просто как 1️⃣-2️⃣-3️⃣:
+
+1️⃣ Купить звезды через официального бота @PremiumBot
+2️⃣ Оплатить звездами подписку для бота и получить ключ
+3️⃣ Установить приложение Outline (ссылки по команде /getoutline) и вставить в него ключ
 
 🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ.
     """.strip()
@@ -1129,6 +1137,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("download", download_outline))
     application.add_handler(CommandHandler("paysupport", paysupport_handler))
+    application.add_handler(CommandHandler("getoutline", download_outline))
     application.add_handler(MessageHandler(filters.Text("🛒 Купить доступ"), buy_handler))
     application.add_handler(MessageHandler(filters.Text("🔑 Мой ключ"), my_key))
     application.add_handler(MessageHandler(filters.Text("📊 Мои лимиты"), my_limits))
