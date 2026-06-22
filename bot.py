@@ -400,14 +400,19 @@ async def _issue_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_text_with_retries(
         update.message,
         "🔐 Ключ Outline успешно создан \\(нажмите, чтобы скопировать\\):\n\n"
-        f"`{access_key}`"
-        "\n\n🛜 Для подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить"
+        f"`{access_key}`",
+        operation_name="_issue_key.success_key.reply_text",
+        parse_mode="MarkdownV2",
+    )
+
+    await reply_text_with_retries(
+        update.message,
+        "🛜 Для подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить"
         "\n\nПосле этого можете активировать VPN кнопкой Подключить"
         "\n\n📥 Если у вас нет приложения Outline, вы можете его скачать воспользовавшись командой /download"
         f"\n\n⏳ Вы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport"
         "\n\n🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ",
-        operation_name="_issue_key.success.reply_text",
-        parse_mode="MarkdownV2",
+        operation_name="_issue_key.success_instructions.reply_text",
     )
 
 
