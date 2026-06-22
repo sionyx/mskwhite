@@ -753,6 +753,8 @@ async def paysupport_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
+    await notify_admin_user_started(update, context)
+
     subscription_price_stars = context.application.bot_data["subscription_price_stars"]
     traffic_limit_mb = context.application.bot_data['traffic_limit_mb'] / 1000
     welcome_text = f"""
@@ -911,6 +913,8 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     except sqlite3.Error as error:
         logging.exception("Не удалось сохранить платеж в SQLite: %s", error)
 
+    await notify_admin_subscription_purchased(update, context)
+
     await reply_text_with_retries(
         update.message,
         "✅ Покупка подтверждена!\n\n"
@@ -958,6 +962,50 @@ def format_user_mention(user: User) -> str:
     full_name = user.full_name
     return (
         f"{full_name} ({username}, id={user.id})"
+    )
+
+
+async def notify_admin_user_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Уведомляет администратора о новом пользователе, запустившем бота."""
+    user = update.effective_user
+    admin_user_id = context.application.bot_data.get("admin_user_id")
+
+    if not user or admin_user_id is None or user.id == admin_user_id:
+        return
+
+    await send_message_with_retries(
+        context.bot,
+        admin_user_id,
+        (
+            "🚀 Новый пользователь запустил бота\n\n"
+            f"👤 {format_user_mention(user)}"
+        ),
+        operation_name="notify_admin_user_started.send_message",
+    )
+
+
+async def notify_admin_subscription_purchased(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Уведомляет администратора о покупке подписки пользователем."""
+    user = update.effective_user
+    payment = update.message.successful_payment if update.message else None
+    admin_user_id = context.application.bot_data.get("admin_user_id")
+
+    if not user or not payment or admin_user_id is None:
+        return
+
+    subscription_price_stars = context.application.bot_data["subscription_price_stars"]
+
+    await send_message_with_retries(
+        context.bot,
+        admin_user_id,
+        (
+            "💸 Пользователь купил подписку\n\n"
+            f"👤 {format_user_mention(user)}\n"
+            f"⭐ Сумма: {payment.total_amount} {payment.currency}"
+            f" (тариф: {subscription_price_stars} Telegram Stars)\n"
+            f"🧾 Payment ID: {payment.telegram_payment_charge_id}"
+        ),
+        operation_name="notify_admin_subscription_purchased.send_message",
     )
 
 
