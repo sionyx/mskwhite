@@ -401,7 +401,8 @@ async def _issue_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.message,
         "🔐 Ключ Outline успешно создан \\(нажмите, чтобы скопировать\\):\n\n"
         f"`{access_key}`"
-        "\n\n🛜 Для подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить. После этого можете активировать VPN кнопкой Подключить."
+        "\n\n🛜 Для подключения откройте приложение Outline, нажмите ➕, вставьте ключ в открывшееся окно, нажмите Подтвердить"
+        "\n\nПосле этого можете активировать VPN кнопкой Подключить"
         "\n\n📥 Если у вас нет приложения Outline, вы можете его скачать воспользовавшись командой /download"
         f"\n\n⏳ Вы можете проверить работу сервиса использовав до {limit_mb:.0f} МБ, и в случае проблем запросить возврат командой paysupport"
         "\n\n🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ",
@@ -772,7 +773,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 1️⃣ Купить звезды через официального бота @PremiumBot
 2️⃣ Оплатить звездами подписку для бота и получить ключ
-3️⃣ Установить приложение Outline (ссылки по команде /getoutline) и вставить в него ключ
+3️⃣ Установить приложение Outline (ссылки по команде /download) и вставить в него ключ
 
 🤔 Если у вас остались вопросы, просто напишите их в чат с ботом — вопрос будет перенаправлен администратору и вы быстро получите ответ.
     """.strip()
@@ -1185,7 +1186,6 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("download", download_outline))
     application.add_handler(CommandHandler("paysupport", paysupport_handler))
-    application.add_handler(CommandHandler("getoutline", download_outline))
     application.add_handler(MessageHandler(filters.Text("🛒 Купить доступ"), buy_handler))
     application.add_handler(MessageHandler(filters.Text("🔑 Мой ключ"), my_key))
     application.add_handler(MessageHandler(filters.Text("📊 Мои лимиты"), my_limits))
